@@ -1,0 +1,13 @@
+# Backup wake-up for the free Render service (it also pings itself).
+# Set repo variable RENDER_URL: Settings → Secrets and variables → Actions → Variables.
+name: keepalive
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    if: vars.RENDER_URL != ''
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsS --max-time 60 "${{ vars.RENDER_URL }}/health" || true
