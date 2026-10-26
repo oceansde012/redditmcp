@@ -1,0 +1,42 @@
+[
+  {
+    "subreddit": "fossdroid",
+    "when": "27.10 17:30",
+    "title": "Dotline Widgets – open-source dot-matrix home screen widgets (clock, weather, music, battery, earbuds). No ads, no trackers",
+    "body": "Hi! I'm the developer. Dotline is a set of six native Android widgets in a dot-matrix style inspired by Nothing's design, but they work on any phone with Android 12+.\n\n- Head (5x1): date with the month in dots, next alarm\n- Time (3x2): big dot-matrix clock\n- Weather (2x2): temperature, high/low, a red dot when rain is likely soon\n- Player (5x2): cover, controls, a 28-dot progress bar; resumes your last player when idle\n- Power (3x1): battery %, 10-dot level bar, time to full\n- Buds (2x1): left / right / case battery of connected earbuds\n\nNo account, no ads, no analytics, no crash reporting. Weather comes from Open-Meteo, the city is stored only on the device. MIT licensed.\n\nInstall: APK from GitHub Releases, or add the repo to Obtainium to get updates.\nSource: https://github.com/oceansde012/dotline-widgets\n\nUI in English, Ukrainian and Russian. I've mostly tested on One UI, so reports from other phones are very welcome.",
+    "notes": "Тип поста: Images (обидві картинки) + текст. Перші 2 години відповідай на всі коментарі — від цього залежить охоплення.",
+    "images": ["all_widgets.png", "privacy.png"]
+  },
+  {
+    "subreddit": "NothingTech",
+    "when": "29.10 17:30",
+    "title": "I made Nothing-style dot-matrix widgets that work on any Android phone (free, open source)",
+    "body": "Not an official Nothing app, just a fan of the design. I wanted the dot-matrix look on my Samsung, so I built it.\n\nSix widgets: date + next alarm, clock, weather, music player with a dot progress bar, battery, earbuds battery. Dark theme only, max one red accent per widget, IBM Plex Mono.\n\nNo ads, no account, no tracking. Android 12+.\n\nGitHub (APK in Releases): https://github.com/oceansde012/dotline-widgets\n\nWould love feedback from people with actual Nothing phones: does it sit well next to the stock widgets?",
+    "notes": "Якщо є флейр на кшталт Community / Fan made — вибери його. Обов'язково лиши рядок, що це не офіційний застосунок Nothing.",
+    "images": ["hero.png", "player.png"]
+  },
+  {
+    "subreddit": "androidthemes",
+    "when": "31.10 17:00",
+    "title": "Dot-matrix everything",
+    "body": "Widgets: Dotline Widgets – Head, Time, Weather, Player (I'm the dev, free and open source): https://github.com/oceansde012/dotline-widgets\nLauncher: \nIcons: \nWallpaper: ",
+    "notes": "Тут потрібен скрін ТВОГО домашнього екрана з віджетами: зроби його і постав першою картинкою, мою додай другою. Флейр Setup. Текст вище — не в пост, а ПЕРШИМ КОМЕНТАРЕМ (допиши лаунчер, іконки, шпалери).",
+    "images": ["power_weather.png"]
+  },
+  {
+    "subreddit": "androidapps",
+    "when": "02.11 17:30",
+    "title": "[DEV] Dotline – free, ad-free dot-matrix widgets for Android 12+ (open source)",
+    "body": "Hey r/androidapps, I made a small widget pack and would like honest feedback.\n\nWhat it is: six home screen widgets that look like a dot-matrix display. Clock, date with next alarm, weather, music player, battery, earbuds battery.\n\nWhat it isn't: no ads, no sign-in, no analytics. Notification access is only used to read media sessions for the player widget.\n\nNot on the Play Store yet, so it's an APK from GitHub Releases (or track it with Obtainium): https://github.com/oceansde012/dotline-widgets\n\nQuestions I'd love answers to:\n1. Which widget would you actually keep on your home screen?\n2. What's missing? (thinking about calendar / steps next)",
+    "notes": "Флейр Dev / Developer, якщо є. Спитають про Play Store — відповідай чесно, що поки лише GitHub.",
+    "images": ["all_widgets.png", "player.png", "privacy.png"]
+  },
+  {
+    "subreddit": "SideProject",
+    "when": "04.11 17:30",
+    "title": "Built Android widgets that look like a dot-matrix display – no ads, no accounts, MIT",
+    "body": "Dotline is a set of six native Android widgets (clock, date, weather, music player, battery, earbuds) in a strict dot-matrix style: dark only, one red accent, numerals drawn dot by dot.\n\nStack: Kotlin, native widgets, Open-Meteo for weather, GitHub Actions builds and publishes signed releases, the app updates itself from GitHub Releases.\n\nRepo: https://github.com/oceansde012/dotline-widgets\n\nWhat would you add next?",
+    "notes": "Тут самопіар дозволений. Добре заходять відповіді в коментарях про технічні деталі.",
+    "images": ["hero.png"]
+  }
+]

@@ -3,6 +3,7 @@ services:
     name: redditmcp-bot
     runtime: python
     plan: free
+    region: frankfurt
     buildCommand: pip install -r requirements.txt
     startCommand: python worker.py
     healthCheckPath: /health
@@ -11,25 +12,11 @@ services:
         value: 3.12.7
       - key: TIMEZONE
         value: Europe/Kyiv
-      - key: CLAUDE_MODEL
-        value: claude-sonnet-5-5
-      - key: REDDIT_CLIENT_ID
-        sync: false
-      - key: REDDIT_CLIENT_SECRET
-        sync: false
-      - key: REDDIT_USERNAME
-        sync: false
-      - key: REDDIT_PASSWORD
-        sync: false
-      - key: REDDIT_USER_AGENT
-        sync: false
+      - key: DIGEST_HOUR
+        value: "10"
+      - key: TELEGRAM_OWNER_ID
+        value: "0"
       - key: DATABASE_URL
         sync: false
       - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_OWNER_ID
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: PERSONA
         sync: false

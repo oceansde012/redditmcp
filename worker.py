@@ -1,169 +1,112 @@
-"""Cloud worker (Render): watches the Reddit inbox, drafts replies with Claude, asks for
-one-tap approval in Telegram, publishes scheduled posts. Also serves /health and pings
-itself so a free Render instance never sleeps.
+"""Telegram reminder bot (Render, free). Posts with images are prepared in advance and stored
+in Postgres; at publish time the bot sends the images plus copy-ready title and text, and you
+publish on Reddit yourself. No Reddit API, no paid services. Pings itself so it never sleeps.
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
 import time
 import uuid
+from datetime import timedelta
 
-import anthropic
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientSession, ClientTimeout, FormData, web
 
 import core
 
-log = logging.getLogger("worker")
+log = logging.getLogger("bot")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OWNER = int(os.getenv("TELEGRAM_OWNER_ID") or 0)
-POLL_SECONDS = core.env_int("POLL_SECONDS", 300)
-MAX_DRAFTS_PER_TICK = core.env_int("MAX_DRAFTS_PER_TICK", 5)
-IGNORE = {u.strip().lower() for u in (os.getenv("IGNORE_USERS") or "AutoModerator").split(",") if u.strip()}
-MODEL = os.getenv("CLAUDE_MODEL") or "claude-sonnet-5-5"
-PERSONA = os.getenv("PERSONA") or "(not provided)"
+DIGEST_HOUR = core.env_int("DIGEST_HOUR", 10)
 
-HELP = """Команди:
-/post r/сабредіт 2026-10-27 18:30   (або 18:30, або зараз)
+HELP = """Я нагадую, коли публікувати пост, і даю все готове: картинки, заголовок і текст (тапни, щоб скопіювати).
+
+/today — що сьогодні
+/queue — уся черга
+/cancel <id> — прибрати пост
+/post r/сабредіт 18:30   (або 27.10 18:30)
 Заголовок
-Текст поста (або одне посилання для link-поста)
+Текст — додати свій пост вручну"""
 
-/edit <посилання або id>
-Новий текст поста чи коментаря
+state = {"await_link": None, "last_error": ""}
 
-/queue — черга постів
-/cancel <id> — скасувати пост
-/rules r/сабредіт — правила сабредіту
-/stats — акаунт і ліміти
-/check — перевірити вхідні зараз
-/pause, /resume — зупинити або відновити автопідготовку відповідей"""
-
-SYSTEM = """You write Reddit replies on behalf of the account owner.
-About the owner: {persona}
-
-Rules:
-- Reply in the same language as the comment you are answering.
-- Sound like a regular member of this subreddit: short, specific, helpful. No corporate tone,
-  no hashtags, no emojis unless they used them.
-- Answer what was actually said. Don't push links or products unless directly asked.
-- Never invent facts about the owner or their product; if unsure, stay general or ask back.
-- If no reply is needed (plain thanks, spam, trolling, nothing to add), output exactly SKIP.
-Output only the reply text."""
-
-state = {"edit": None, "last_error": "", "claude": None}
-tick_lock = asyncio.Lock()
-
-
-def draft_reply(item: dict, avoid: str = "") -> str:
-    ctx = "\n".join(f"{k}: {v}" for k, v in [
-        ("Subreddit", f"r/{item['subreddit']}" if item["subreddit"] else "private message"),
-        ("Message subject", item.get("subject")), ("Post title", item["post_title"]),
-        ("Post text", item["post_text"]), ("The owner's text they replied to", item["parent_text"]),
-        (f"Comment from u/{item['author']} (reply to this)", item["body"])] if v)
-    if avoid:
-        ctx += f"\n\nWrite a noticeably different reply than this one:\n{avoid}"
-    state["claude"] = state["claude"] or anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
-    msg = state["claude"].messages.create(model=MODEL, max_tokens=700, system=SYSTEM.format(persona=PERSONA),
-                                 messages=[{"role": "user", "content": ctx}])
-    return "".join(b.text for b in msg.content if b.type == "text").strip()
-
-
-# -------------------------------------------------------------- telegram ---
 
 class Telegram:
     def __init__(self, session: ClientSession):
         self.s = session
         self.base = f"https://api.telegram.org/bot{TOKEN}/"
 
-    async def call(self, method: str, **params):
-        async with self.s.post(self.base + method, json=params, timeout=ClientTimeout(total=70)) as r:
+    async def call(self, method: str, form: FormData | None = None, **params):
+        kw = {"data": form} if form else {"json": params}
+        async with self.s.post(self.base + method, timeout=ClientTimeout(total=120), **kw) as r:
             data = await r.json()
         if not data.get("ok"):
             log.warning("telegram %s: %s", method, data.get("description"))
         return data.get("result")
 
-    async def send(self, text: str, buttons: list | None = None, chat_id: int | None = None):
-        params = {"chat_id": chat_id or OWNER, "text": text[:4000], "disable_web_page_preview": True}
+    async def send(self, text: str, buttons: list | None = None, chat_id: int | None = None, html_mode=False):
+        params = {"chat_id": chat_id or OWNER, "text": text[:4096], "disable_web_page_preview": True}
+        if html_mode:
+            params["parse_mode"] = "HTML"
         if buttons:
             params["reply_markup"] = {"inline_keyboard": buttons}
         return await self.call("sendMessage", **params)
+
+    async def send_images(self, images: list[dict]) -> None:
+        if not images:
+            return
+        form = FormData()
+        form.add_field("chat_id", str(OWNER))
+        if len(images) == 1:
+            form.add_field("photo", bytes(images[0]["data"]), filename=images[0]["filename"])
+            await self.call("sendPhoto", form)
+            return
+        group = []
+        for i, img in enumerate(images[:10]):
+            form.add_field(f"f{i}", bytes(img["data"]), filename=img["filename"])
+            group.append({"type": "photo", "media": f"attach://f{i}"})
+        form.add_field("media", json.dumps(group))
+        await self.call("sendMediaGroup", form)
 
 
 def btn(text: str, data: str) -> dict:
     return {"text": text, "callback_data": data}
 
 
-def buttons_for(d: dict) -> list:
-    if d["kind"] == "reply":
-        return [[btn("✅ Відправити", f"send:{d['id']}"), btn("✏️ Змінити", f"edit:{d['id']}")],
-                [btn("🔄 Інший варіант", f"regen:{d['id']}"), btn("❌ Пропустити", f"skip:{d['id']}")]]
-    return [[btn("✅ Підтвердити", f"send:{d['id']}"), btn("❌ Скасувати", f"skip:{d['id']}")]]
+def post_card(p: dict, header: str) -> str:
+    e = html.escape
+    parts = [f"{header} · <b>r/{e(p['subreddit'])}</b> · <code>{p['id']}</code>",
+             "", "<b>Заголовок</b> (тапни, щоб скопіювати):", f"<code>{e(p['title'])}</code>"]
+    if p["body"]:
+        parts += ["", "<b>Текст:</b>", f"<pre>{e(p['body'][:3000])}</pre>"]
+    if p["notes"]:
+        parts += ["", f"💡 {e(p['notes'])}"]
+    return "\n".join(parts)
 
 
-def card(d: dict) -> str:
-    c = json.loads(d["context"])
-    if d["kind"] == "reply":
-        head = f"💬 u/{c['author']} " + (f"у r/{c['subreddit']}" if c["subreddit"] else "(особисте)")
-        if c["post_title"]:
-            head += f"\n📌 {c['post_title']}"
-        head += f"\n\n{c['body'][:1200]}" + (f"\n🔗 {c['link']}" if c["link"] else "")
-        body = "🤐 Claude радить не відповідати." if d["body"] == "SKIP" else f"✍️ Чернетка:\n{d['body']}"
-        return f"{head}\n\n{body}"
-    if d["kind"] == "edit":
-        return f"✏️ Оновити {d['target']}:\n\n{d['body']}"
-    return f"📝 Пост у r/{c['subreddit']} зараз:\n{c['title']}\n\n{c.get('url') or d['body']}"
+def post_buttons(p: dict) -> list:
+    return [[{"text": f"↗️ Відкрити r/{p['subreddit']}", "url": f"https://www.reddit.com/r/{p['subreddit']}/submit"}],
+            [btn("✅ Опублікував", f"done:{p['id']}"), btn("⏰ +1 год", f"snooze:{p['id']}")],
+            [btn("📅 Завтра", f"tomorrow:{p['id']}"), btn("❌ Пропустити", f"skip:{p['id']}")]]
 
 
-def new_draft(kind: str, target: str, body: str, context: dict) -> dict:
-    d = {"id": uuid.uuid4().hex[:10], "kind": kind, "target": target, "body": body,
-         "context": json.dumps(context, ensure_ascii=False)}
-    core.q("insert into drafts (id, kind, target, context, body, status, created) "
-           "values (%s, %s, %s, %s, %s, 'pending', %s)",
-           (d["id"], kind, target, d["context"], body, time.time()))
-    return d
-
-
-async def show(tg: Telegram, d: dict) -> None:
-    m = await tg.send(card(d), buttons_for(d))
-    if m:
-        core.q("update drafts set tg_message_id=%s where id=%s", (m["message_id"], d["id"]))
-
-
-def execute(d: dict) -> str:
-    if d["kind"] == "reply":
-        return core.reply_to(d["target"], d["body"])
-    if d["kind"] == "edit":
-        return core.edit_thing(d["target"], d["body"])
-    c = json.loads(d["context"])
-    return core.submit_post(c["subreddit"], c["title"], d["body"], c.get("url", ""))
-
-
-async def process_approved(tg: Telegram, announce_id: str = "") -> None:
-    """Send approved drafts; ones blocked by the limits stay approved and go on a later tick."""
-    for d in core.q("select * from drafts where status='approved' order by created"):
-        try:
-            url = await asyncio.to_thread(execute, d)
-        except core.Blocked as b:
-            if d["id"] == announce_id:
-                await tg.send(f"⏳ Поставив у чергу ({b}). Відправлю автоматично.")
-            continue
-        except Exception as e:
-            core.q("update drafts set status='failed', result=%s where id=%s", (core.err(e), d["id"]))
-            await tg.send(f"⚠️ Не вдалося: {core.err(e)}")
-            continue
-        core.q("update drafts set status='done', result=%s where id=%s", (url, d["id"]))
-        await tg.send(f"✅ Відправлено: {url}")
+async def remind(tg: Telegram, p: dict) -> None:
+    images = core.q("select filename, data from media where post_id=%s order by ord", (p["id"],))
+    await tg.send_images(images)
+    await tg.send(post_card(p, "🔔 Час публікувати"), post_buttons(p), html_mode=True)
+    core.q("update posts set status='reminded' where id=%s", (p["id"],))
 
 
 # ------------------------------------------------------------- handlers ---
 
 async def on_callback(tg: Telegram, cb: dict) -> None:
-    action, _, did = cb.get("data", "").partition(":")
-    d = core.q("select * from drafts where id=%s", (did,), one=True)
+    action, _, pid = cb.get("data", "").partition(":")
+    p = core.q("select * from posts where id=%s", (pid,), one=True)
     msg = cb["message"]
 
     async def answer(text: str):
@@ -173,30 +116,29 @@ async def on_callback(tg: Telegram, cb: dict) -> None:
         await tg.call("editMessageReplyMarkup", chat_id=msg["chat"]["id"], message_id=msg["message_id"],
                       reply_markup={"inline_keyboard": []})
 
-    if not d or d["status"] != "pending":
+    if not p or p["status"] in ("done", "skipped"):
         return await answer("Вже оброблено")
-    if action == "send":
-        if d["body"] == "SKIP":
-            return await answer("Спершу 🔄 або ✏️")
-        core.q("update drafts set status='approved' where id=%s", (did,))
-        await answer("Відправляю…")
+    if action == "done":
+        core.q("update posts set status='done' where id=%s", (pid,))
+        state["await_link"] = pid
+        await answer("🔥")
         await drop_buttons()
-        await process_approved(tg, announce_id=did)
+        await tg.send("Супер! Скинь посилання на пост: я дивитимусь, що заходить, і підлаштовуватиму наступні.")
+    elif action in ("snooze", "tomorrow"):
+        delay = 3600 if action == "snooze" else 86400
+        core.q("update posts set status='pending', publish_at=%s where id=%s", (time.time() + delay, pid))
+        await answer("Нагадаю " + ("через годину" if action == "snooze" else "завтра"))
+        await drop_buttons()
     elif action == "skip":
-        core.q("update drafts set status='skipped' where id=%s", (did,))
+        core.q("update posts set status='skipped' where id=%s", (pid,))
         await answer("Пропущено")
         await drop_buttons()
-    elif action == "edit":
-        state["edit"] = did
-        await answer("Чекаю текст")
-        await tg.send("Надішли свій текст відповіді одним повідомленням. /cancel_edit — скасувати.")
-    elif action == "regen":
-        await answer("Пишу інший варіант…")
-        d["body"] = await asyncio.to_thread(draft_reply, json.loads(d["context"]), d["body"])
-        core.q("update drafts set body=%s where id=%s", (d["body"], did))
-        await tg.call("editMessageText", chat_id=msg["chat"]["id"], message_id=msg["message_id"],
-                      text=card(d)[:4000], disable_web_page_preview=True,
-                      reply_markup={"inline_keyboard": buttons_for(d)})
+
+
+def queue_text(rows: list[dict]) -> str:
+    icons = {"pending": "🕓", "reminded": "🔔"}
+    return "\n".join(f"{icons.get(r['status'], '')} {core.fmt(r['publish_at'])} · r/{r['subreddit']} · "
+                     f"{r['title'][:60]} · {r['id']}" for r in rows)
 
 
 async def on_message(tg: Telegram, text: str) -> None:
@@ -205,53 +147,35 @@ async def on_message(tg: Telegram, text: str) -> None:
     cmd = cmd.split("@")[0].lower() if cmd.startswith("/") else ""
     rest, args = rest.strip(), args.strip()
 
-    if state["edit"] and not cmd:
-        did, state["edit"] = state["edit"], None
-        core.q("update drafts set body=%s, status='approved' where id=%s and status='pending'", (text.strip(), did))
-        return await process_approved(tg, announce_id=did)
+    if state["await_link"] and not cmd and "reddit.com" in text:
+        core.q("update posts set link=%s where id=%s", (text.strip(), state["await_link"]))
+        state["await_link"] = None
+        return await tg.send("Записав 👍")
 
-    if cmd == "/cancel_edit":
-        state["edit"] = None
-        await tg.send("Ок, редагування скасовано.")
+    if cmd == "/today":
+        start = core.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = core.q("select * from posts where status in ('pending','reminded') and publish_at<%s "
+                      "order by publish_at", ((start + timedelta(days=1)).timestamp(),))
+        await tg.send(queue_text(rows) or "Сьогодні нічого. Відпочивай 😌")
+    elif cmd == "/queue":
+        rows = core.q("select * from posts where status in ('pending','reminded') order by publish_at")
+        await tg.send(queue_text(rows) or "Черга порожня.")
+    elif cmd == "/cancel":
+        ok = core.q("update posts set status='skipped' where id=%s and status in ('pending','reminded') "
+                    "returning id", (args,), one=True)
+        await tg.send("Прибрав." if ok else "Не знайшов такого поста.")
     elif cmd == "/post":
         sub, _, when = args.partition(" ")
         title, _, body = rest.partition("\n")
-        body = body.strip()
         if not sub or not title:
             return await tg.send("Формат:\n/post r/сабредіт 18:30\nЗаголовок\nТекст")
-        url = body if body.startswith("http") and "\n" not in body else ""
-        sub = sub.removeprefix("r/").removeprefix("/r/")
+        sub = sub.removeprefix("/").removeprefix("r/")
         ts = core.parse_when(when)
-        if ts is None:
-            ctx = {"subreddit": sub, "title": title.strip(), "url": url}
-            await show(tg, new_draft("post", sub, "" if url else body, ctx))
-        else:
-            sid = core.schedule_post(sub, title.strip(), "" if url else body, url, "", ts)
-            await tg.send(f"🗓 Заплановано {sid} на {core.fmt(ts)} у r/{sub}.\n"
-                          f"Порада: перевір /rules r/{sub}")
-    elif cmd == "/edit":
-        if not args or not rest:
-            return await tg.send("Формат:\n/edit <посилання>\nНовий текст")
-        await show(tg, new_draft("edit", core.fullname(args), rest, {}))
-    elif cmd == "/queue":
-        rows = core.list_scheduled()
-        await tg.send("\n".join(f"{r['id']} · {core.fmt(r['publish_at'])} · r/{r['subreddit']} · {r['title']}"
-                                for r in rows) or "Черга порожня.")
-    elif cmd == "/cancel":
-        await tg.send("Скасовано." if core.cancel_scheduled(args) else "Не знайшов такого поста в черзі.")
-    elif cmd == "/rules":
-        await tg.send(await asyncio.to_thread(core.subreddit_rules_text, args or "test"))
-    elif cmd == "/stats":
-        pending = core.q("select count(*) as n from drafts where status in ('pending','approved')", one=True)["n"]
-        paused = " · ⏸ на паузі" if core.kv_get("paused") == "1" else ""
-        await tg.send(await asyncio.to_thread(core.whoami_text) + f"\nЧернеток чекає: {pending}{paused}")
-    elif cmd == "/check":
-        await tg.send("Перевіряю…")
-        await tick(tg)
-    elif cmd in ("/pause", "/resume"):
-        core.kv_set("paused", "1" if cmd == "/pause" else "0")
-        await tg.send("⏸ Пауза: нових чернеток не буде, пости за розкладом ідуть." if cmd == "/pause"
-                      else "▶️ Продовжую.")
+        pid = uuid.uuid4().hex[:6]
+        core.q("insert into posts (id, subreddit, title, body, notes, publish_at, created) "
+               "values (%s, %s, %s, %s, '', %s, %s)", (pid, sub, title.strip(), body.strip(), ts, time.time()))
+        warn = core.spacing_warnings(sub, ts, pid)
+        await tg.send(f"🗓 Нагадаю {core.fmt(ts)} · r/{sub} · {pid}" + ("".join(f"\n⚠️ {w}" for w in warn)))
     else:
         await tg.send(HELP)
 
@@ -260,10 +184,10 @@ async def handle_update(tg: Telegram, u: dict) -> None:
     chat = (u.get("message") or u.get("callback_query", {}).get("message") or {}).get("chat", {})
     if not OWNER:
         if chat.get("id"):
-            await tg.send(f"Твій chat id: {chat['id']}\nДодай його в TELEGRAM_OWNER_ID на Render.", chat_id=chat["id"])
+            await tg.send(f"Твій chat id: {chat['id']}\nВпиши його в TELEGRAM_OWNER_ID на Render.", chat_id=chat["id"])
         return
     if chat.get("id") != OWNER:
-        return  # only the owner can control the bot
+        return  # only the owner can use the bot
     if "callback_query" in u:
         await on_callback(tg, u["callback_query"])
     elif u.get("message", {}).get("text"):
@@ -272,44 +196,32 @@ async def handle_update(tg: Telegram, u: dict) -> None:
 
 # ---------------------------------------------------------------- loops ---
 
-async def check_inbox(tg: Telegram) -> None:
-    items = await asyncio.to_thread(core.fetch_unread)
-    new = [i for i in items if not core.q("select 1 from seen where id=%s", (i["id"],), one=True)]
-    for it in new[:MAX_DRAFTS_PER_TICK]:
-        core.q("insert into seen (id, ts) values (%s, %s) on conflict do nothing", (it["id"], time.time()))
-        if it["is_self"] or it["author"].lower() in IGNORE:
-            continue
-        body = await asyncio.to_thread(draft_reply, it)
-        await show(tg, new_draft("reply", it["id"], body, it))
-    if new:
-        await asyncio.to_thread(core.mark_read, [i["id"] for i in new[:MAX_DRAFTS_PER_TICK]])
+async def digest(tg: Telegram) -> None:
+    today = core.now()
+    if today.hour < DIGEST_HOUR or core.kv_get("digest_day") == today.strftime("%Y-%m-%d"):
+        return
+    core.kv_set("digest_day", today.strftime("%Y-%m-%d"))
+    end = today.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    rows = core.q("select * from posts where status in ('pending','reminded') and publish_at<%s "
+                  "order by publish_at", (end.timestamp(),))
+    if rows:
+        await tg.send("☀️ Сьогодні в планах:\n" + queue_text(rows) + "\n\nНагадаю кожен у свій час.")
 
 
-async def tick(tg: Telegram) -> None:
-    async with tick_lock:  # /check and the timer must not draft the same comment twice
-        await _tick(tg)
-
-
-async def _tick(tg: Telegram) -> None:
-    try:
-        if core.kv_get("paused") != "1":
-            await check_inbox(tg)
-        for status, text in await asyncio.to_thread(core.run_due_posts):
-            if status in ("published", "failed"):
-                await tg.send(("🚀 " if status == "published" else "⚠️ ") + text)
-        await process_approved(tg)
-        state["last_error"] = ""
-    except Exception as e:
-        log.exception("tick failed")
-        if core.err(e) != state["last_error"]:  # don't repeat the same error every few minutes
-            state["last_error"] = core.err(e)
-            await tg.send(f"⚠️ Помилка: {core.err(e)}")
-
-
-async def reddit_loop(tg: Telegram) -> None:
+async def reminder_loop(tg: Telegram) -> None:
     while True:
-        await tick(tg)
-        await asyncio.sleep(POLL_SECONDS)
+        try:
+            for p in core.q("select * from posts where status='pending' and publish_at<=%s order by publish_at",
+                            (time.time(),)):
+                await remind(tg, p)
+            await digest(tg)
+            state["last_error"] = ""
+        except Exception as e:
+            log.exception("reminder loop")
+            if str(e) != state["last_error"]:
+                state["last_error"] = str(e)
+                await tg.send(f"⚠️ {type(e).__name__}: {e}")
+        await asyncio.sleep(60)
 
 
 async def telegram_loop(tg: Telegram) -> None:
@@ -331,7 +243,7 @@ async def telegram_loop(tg: Telegram) -> None:
                 await handle_update(tg, u)
             except Exception as e:
                 log.exception("update failed")
-                await tg.send(f"⚠️ {core.err(e)}")
+                await tg.send(f"⚠️ {type(e).__name__}: {e}")
 
 
 async def keepalive(session: ClientSession) -> None:
@@ -363,11 +275,11 @@ async def main() -> None:
     await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT") or 10000)).start()
     async with ClientSession() as session:
         tg = Telegram(session)
+        loops = [telegram_loop(tg), keepalive(session)]
         if OWNER:
-            await tg.send("🟢 Reddit-бот запущено. /help — команди")
-            await asyncio.gather(telegram_loop(tg), reddit_loop(tg), keepalive(session))
-        else:  # first run: only tell the user their chat id
-            await asyncio.gather(telegram_loop(tg), keepalive(session))
+            await tg.send("🟢 Бот на зв'язку. /today — що сьогодні, /queue — уся черга")
+            loops.append(reminder_loop(tg))
+        await asyncio.gather(*loops)
 
 
 if __name__ == "__main__":
